@@ -1,0 +1,20 @@
+# Django core
+Django==5.2.8
+djangorestframework==3.16.1
+django-cors-headers==4.9.0
+
+# PostgreSQL adapter
+psycopg2-binary>=2.9.9
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Async tasks
+celery==5.5.3
+redis==7.1.0
+
+# Production WSGI server
+gunicorn>=21.2.0
+
+# Utilities
+tqdm==4.67.1
