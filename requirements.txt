@@ -18,3 +18,5 @@ gunicorn>=21.2.0
 
 # Utilities
 tqdm==4.67.1
+requests>=2.31.0
+

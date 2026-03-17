@@ -90,7 +90,7 @@ DECLARE
 BEGIN
     FOR i IN 0..12 LOOP
         PERFORM create_auditlog_partition(
-            DATE_TRUNC('month', NOW()) + (i || ' months')::INTERVAL
+            (DATE_TRUNC('month', NOW()) + (i || ' months')::INTERVAL)::DATE
         );
     END LOOP;
 END;
