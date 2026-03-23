@@ -18,11 +18,11 @@ const aiContent = ref('');
 const generatedMeta = ref('');      
 const competitorData = ref(null);   
 
-// Новые поля для UI (ПТ-6, ПТ-7)
 const roles = ref([]);
 const selectedRole = ref(null);
 const customLSI = ref('');
 const isPreviewMode = ref(false); // Для переключения режимов
+const activeTab = ref('tz'); // 'tz' | 'article'
 
 onMounted(async () => {
   try {
@@ -96,15 +96,41 @@ async function generateMeta() {
   }
 }
 
-const downloadDocx = () => {
+const downloadDocx = async (type) => {
   const pathParts = window.location.pathname.split('/');
   const projectId = pathParts[pathParts.length - 1] || pathParts[pathParts.length - 2];
-  const link = `http://127.0.0.1:8000/api/projects/${projectId}/download_docx/?cluster_id=${props.cluster.id}`;
-  window.open(link, '_blank');
+  
+  const content = type === 'article' ? aiContent.value : finalText.value;
+  if (!content) return alert("Нет контента для скачивания");
+
+  const lsiStr = competitorData.value?.lsi_words ? competitorData.value.lsi_words.join(', ') : '';
+  const payload = {
+    cluster_id: props.cluster.id,
+    doc_type: type,
+    content: content,
+    meta: generatedMeta.value || '',
+    lsi: type === 'tz' ? lsiStr : '' 
+  };
+
+  try {
+    const res = await axios.post(`http://127.0.0.1:8000/api/projects/${projectId}/download_docx/`, payload, {
+      responseType: 'blob'
+    });
+    
+    const url = window.URL.createObjectURL(new Blob([res.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${type === 'article' ? 'Article' : 'TZ'}_${props.cluster.name}.docx`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("Ошибка скачивания DOCX.");
+  }
 };
 
 const finalText = computed(() => {
-  if (aiContent.value) return aiContent.value;
   if (!props.cluster) return 'Загрузка...';
 
   const sortedKw = [...props.cluster.keywords].sort((a, b) => b.volume - a.volume);
@@ -193,11 +219,9 @@ function copyToClipboard() {
     <div class="actual-box">
       
       <div class="box-header">
-        <h2>
-          {{ aiContent ? '✨ Редактор статьи' : `ТЗ: ${cluster?.name}` }}
-        </h2>
+        <h2>{{ cluster?.name || 'ТЗ и Статья' }}</h2>
         
-        <div class="actions">
+        <div class="header-controls">
           <!-- БЛОК ПАРАМЕТРОВ AI -->
           <div class="ai-controls">
             <select v-model="selectedRole">
@@ -207,26 +231,32 @@ function copyToClipboard() {
             <input type="text" v-model="customLSI" placeholder="Доп. LSI (напр: купить, срочно)">
           </div>
 
-          <button @click="generateArticle" class="btn btn-magic" :disabled="isGeneratingAi">
-            {{ isGeneratingAi ? 'Пишу...' : '✨ Написать статью' }}
-          </button>
+          <div class="actions">
+            <button @click="generateArticle" class="btn btn-magic" :disabled="isGeneratingAi">
+              {{ isGeneratingAi ? 'Пишу...' : '✨ Написать статью' }}
+            </button>
+            <button @click="analyzeCompetitors" class="btn btn-blue" :disabled="isAnalyzing">
+              {{ isAnalyzing ? 'Анализ...' : '🔍 Анализ' }}
+            </button>
+            <button @click="generateMeta" class="btn btn-yellow" :disabled="isMetaLoading">
+              {{ isMetaLoading ? '...' : '🏷 Meta' }}
+            </button>
 
-          <button @click="analyzeCompetitors" class="btn btn-blue" :disabled="isAnalyzing">
-            {{ isAnalyzing ? 'Анализ...' : '🔍 Анализ' }}
-          </button>
-
-          <button @click="generateMeta" class="btn btn-yellow" :disabled="isMetaLoading">
-            {{ isMetaLoading ? '...' : '🏷 Meta' }}
-          </button>
-
-          <div class="divider"></div>
-          <button @click="downloadDocx" class="btn btn-grey">DOCX</button>
-          <button @click="copyToClipboard" class="btn btn-green">Копировать</button>
-          <button @click="$emit('update:modelValue', false)" class="btn btn-red">X</button>
+            <div class="divider"></div>
+            <button @click="downloadDocx('tz')" class="btn btn-grey">DOCX ТЗ</button>
+            <button @click="downloadDocx('article')" class="btn btn-grey" :disabled="!aiContent">DOCX Статья</button>
+            <button @click="copyToClipboard" class="btn btn-green">Копировать</button>
+            <button @click="$emit('update:modelValue', false)" class="btn btn-red">X</button>
+          </div>
         </div>
       </div>
       
       <div class="box-body">
+        <div class="main-tabs">
+          <button @click="activeTab = 'tz'" :class="{active: activeTab === 'tz'}">ТЗ для копирайтера</button>
+          <button @click="activeTab = 'article'" :class="{active: activeTab === 'article'}">Готовая статья</button>
+        </div>
+
         <div v-if="isAnalyzing" class="loader-overlay">
           Изучаем ТОП-3 конкурентов (DuckDuckGo)...<br>Считаем символы и структуру...
         </div>
@@ -237,39 +267,51 @@ function copyToClipboard() {
           Генерируем Title и Description...
         </div>
 
-        <div v-if="generatedMeta && !aiContent" class="meta-panel">
-          <strong>SEO-теги (GigaChat):</strong>
+        <div v-if="generatedMeta && activeTab === 'tz'" class="meta-panel">
+          <div class="panel-header">
+            <strong>SEO-теги (GigaChat):</strong>
+            <button @click="generatedMeta = ''">×</button>
+          </div>
           <pre>{{ generatedMeta }}</pre>
         </div>
 
-        <div v-if="competitorData?.lsi_words && !aiContent" class="lsi-panel">
-          <strong>💡 LSI (TF-IDF анализ):</strong> {{ competitorData.lsi_words.join(', ') }}
+        <div v-if="competitorData?.lsi_words && activeTab === 'tz'" class="lsi-panel">
+          <div class="panel-header">
+            <span><strong>💡 LSI (TF-IDF анализ):</strong> {{ competitorData.lsi_words.join(', ') }}</span>
+            <button @click="competitorData.lsi_words = null">×</button>
+          </div>
         </div>
 
         <!-- ИНТЕРАКТИВНЫЙ РЕДАКТОР СТАТЬИ -->
-        <div v-if="aiContent" class="editor-container">
-            <div class="editor-tabs">
-                <div>
-                   <button @click="isPreviewMode=false" :class="{active: !isPreviewMode}">📝 Редактор (Raw)</button>
-                   <button @click="isPreviewMode=true" :class="{active: isPreviewMode}">👀 Предпросмотр</button>
-                </div>
-                <!-- ПТ-9: ИНСТРУМЕНТ СРАВНЕНИЯ ОБЪЕМА -->
-                <div class="volume-indicator">
-                    Символов: <strong>{{ currentLength }}</strong>
-                    <span v-if="competitorData">
-                        / Конкуренты (ТОП): ~{{ competitorData.avg_text_length }}
-                        <span v-if="currentLength >= competitorData.avg_text_length * 0.9" style="color: #10b981;">(Ок ✓)</span>
-                        <span v-else style="color: #ef4444;">(Мало ⚠️)</span>
-                    </span>
-                    <span v-else style="color: #9ca3af; font-weight: normal; font-size: 0.9em;">(Сделайте анализ конкурентов для сравнения)</span>
-                </div>
+        <div v-show="activeTab === 'article'" class="editor-container">
+            <div v-if="!aiContent" class="empty-article">
+                <p>Статья еще не сгенерирована.</p>
+                <button @click="generateArticle" class="btn btn-magic" :disabled="isGeneratingAi">Сгенерировать статью</button>
             </div>
-            
-            <textarea v-if="!isPreviewMode" v-model="aiContent"></textarea>
-            <div v-else class="markdown-preview" v-html="parsedContent"></div>
+            <template v-else>
+              <div class="editor-tabs">
+                  <div>
+                     <button @click="isPreviewMode=false" :class="{active: !isPreviewMode}">📝 Редактор (Raw)</button>
+                     <button @click="isPreviewMode=true" :class="{active: isPreviewMode}">👀 Предпросмотр</button>
+                  </div>
+                  <!-- ПТ-9: ИНСТРУМЕНТ СРАВНЕНИЯ ОБЪЕМА -->
+                  <div class="volume-indicator">
+                      Символов: <strong>{{ currentLength }}</strong>
+                      <span v-if="competitorData">
+                          / Конкуренты (ТОП): ~{{ competitorData.avg_text_length }}
+                          <span v-if="currentLength >= competitorData.avg_text_length * 0.9" style="color: #10b981;">(Ок ✓)</span>
+                          <span v-else style="color: #ef4444;">(Мало ⚠️)</span>
+                      </span>
+                      <span v-else style="color: #9ca3af; font-weight: normal; font-size: 0.9em;">(Анализ для сравнения)</span>
+                  </div>
+              </div>
+              
+              <textarea v-if="!isPreviewMode" v-model="aiContent"></textarea>
+              <div v-else class="markdown-preview" v-html="parsedContent"></div>
+            </template>
         </div>
 
-        <textarea v-else readonly>{{ finalText }}</textarea>
+        <textarea v-show="activeTab === 'tz'" readonly>{{ finalText }}</textarea>
       </div>
 
     </div>
@@ -295,11 +337,12 @@ function copyToClipboard() {
 
 /* ШАПКА */
 .box-header {
-  display: flex; justify-content: space-between; align-items: center; padding: 15px 20px;
-  border-bottom: 1px solid var(--border-color); background: var(--bg-surface);
+  display: flex; flex-direction: column; align-items: stretch; padding: 15px 20px;
+  border-bottom: 1px solid var(--border-color); background: var(--bg-surface); gap: 10px;
 }
-.box-header h2 { margin: 0; font-size: 1.25rem; color: var(--text-main); font-weight: 700; max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.box-header h2 { margin: 0; font-size: 1.25rem; color: var(--text-main); font-weight: 700; width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.header-controls { display: flex; flex-direction: column; gap: 10px; align-items: center; width: 100%; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; }
 .divider { width: 1px; height: 30px; background: var(--border-color); margin: 0 5px; }
 
 .ai-controls {
@@ -310,8 +353,23 @@ function copyToClipboard() {
 }
 .ai-controls select:focus, .ai-controls input:focus { border-color: var(--primary); }
 
+/* ВКЛАДКИ (ТЗ / Статья) */
+.main-tabs { display: flex; background: var(--bg-input); padding: 0 20px; border-bottom: 1px solid var(--border-color); gap: 10px; }
+.main-tabs button { padding: 12px 20px; border: none; background: transparent; cursor: pointer; color: var(--text-muted); font-weight: 600; font-size: 1rem; border-bottom: 2px solid transparent; transition: all 0.2s; }
+.main-tabs button:hover { color: var(--text-main); }
+.main-tabs button.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* ПАНЕЛИ (META, LSI) */
+.meta-panel { background: rgba(59, 130, 246, 0.1); padding: 15px 25px; border-bottom: 1px solid rgba(59, 130, 246, 0.2); color: var(--primary); font-size: 0.9rem; }
+.meta-panel pre { white-space: pre-wrap; margin: 5px 0 0 0; font-family: monospace; }
+.lsi-panel { background: rgba(245, 158, 11, 0.1); padding: 10px 25px; border-bottom: 1px solid rgba(245, 158, 11, 0.2); color: var(--warning); font-size: 0.9rem; }
+
+.panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
+.panel-header button { background: transparent; border: none; color: inherit; font-size: 1.2rem; cursor: pointer; opacity: 0.7; font-weight: bold; padding: 0 5px; line-height: 1; }
+.panel-header button:hover { opacity: 1; }
+
 /* ТЕЛО */
-.box-body { flex-grow: 1; padding: 0; position: relative; display: flex; flex-direction: column; background: var(--bg-base); }
+.box-body { flex-grow: 1; padding: 0; position: relative; display: flex; flex-direction: column; background: var(--bg-base); min-height: 0; }
 .box-body > textarea {
   flex-grow: 1; width: 100%; border: none; resize: none; padding: 25px;
   font-family: inherit; font-size: 14px; line-height: 1.6;
@@ -319,7 +377,8 @@ function copyToClipboard() {
 }
 
 /* РЕДАКТОР СТАТЬИ */
-.editor-container { display: flex; flex-direction: column; flex-grow: 1; }
+.editor-container { display: flex; flex-direction: column; flex-grow: 1; overflow: hidden; min-height: 0; }
+.empty-article { display: flex; flex-direction: column; align-items: center; justify-content: center; flex-grow: 1; color: var(--text-muted); gap: 15px; }
 .editor-tabs { display: flex; justify-content: space-between; align-items: center; background: var(--bg-input); padding: 8px 20px; border-bottom: 1px solid var(--border-color); }
 .editor-tabs button { padding: 6px 14px; border: none; background: transparent; cursor: pointer; color: var(--text-muted); font-weight: bold; border-radius: var(--radius-sm); transition: all 0.2s; }
 .editor-tabs button:hover { color: var(--text-main); }
@@ -330,17 +389,12 @@ function copyToClipboard() {
   flex-grow: 1; border: none; resize: none; padding: 30px; font-family: inherit; font-size: 15px; line-height: 1.7; background: var(--bg-base); color: var(--text-main); outline: none;
 }
 .markdown-preview {
-  flex-grow: 1; padding: 30px; background: var(--bg-surface); color: var(--text-main); overflow-y: auto; font-family: inherit; line-height: 1.7; font-size: 1.05rem;
+  flex-grow: 1; padding: 30px; background: var(--bg-surface); color: var(--text-main); overflow-y: auto; font-family: inherit; line-height: 1.7; font-size: 1.05rem; min-height: 0;
 }
 .markdown-preview h1, .markdown-preview h2, .markdown-preview h3 { color: var(--text-main); margin-top: 1.5em; margin-bottom: 0.5em; }
 .markdown-preview p { margin-bottom: 1.2em; }
 .markdown-preview ul { padding-left: 20px; margin-bottom: 1.2em; }
 .markdown-preview strong { color: var(--text-main); font-weight: 700; }
-
-/* ПАНЕЛИ (META, LSI) */
-.meta-panel { background: rgba(59, 130, 246, 0.1); padding: 15px 25px; border-bottom: 1px solid rgba(59, 130, 246, 0.2); color: var(--primary); font-size: 0.9rem; }
-.meta-panel pre { white-space: pre-wrap; margin: 5px 0 0 0; font-family: monospace; }
-.lsi-panel { background: rgba(245, 158, 11, 0.1); padding: 10px 25px; border-bottom: 1px solid rgba(245, 158, 11, 0.2); color: var(--warning); font-size: 0.9rem; }
 
 /* ЛОАДЕРЫ */
 .loader-overlay {

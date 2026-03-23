@@ -42,12 +42,12 @@ CREATE TABLE analyzer_auditlog (
 
 # Создание индекса на родительской таблице (наследуется секциями)
 CREATE_AUDITLOG_IDX_DATE = """
-CREATE INDEX auditlog_created_at_idx
+CREATE INDEX IF NOT EXISTS auditlog_created_at_idx
     ON analyzer_auditlog (created_at);
 """
 
 CREATE_AUDITLOG_IDX_PROJECT_DATE = """
-CREATE INDEX auditlog_project_date_idx
+CREATE INDEX IF NOT EXISTS auditlog_project_date_idx
     ON analyzer_auditlog (project_id, created_at);
 """
 

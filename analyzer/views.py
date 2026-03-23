@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.http import JsonResponse, HttpResponse
+from django.core.cache import cache
 from django.db.models import Sum
 from celery.result import AsyncResult
 import requests
@@ -217,10 +218,71 @@ class AIRoleViewSet(viewsets.ModelViewSet):
 
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all().order_by('-created_at')
-    
+
+    # ------------------------------------------------------------------ #
+    # Ключи кэша                                                           #
+    # ------------------------------------------------------------------ #
+    CACHE_KEY_LIST = 'project_list'
+    CACHE_TIMEOUT = 900  # 15 минут
+
+    @staticmethod
+    def _project_detail_key(pk):
+        return f'project_detail_{pk}'
+
+    def _invalidate_project_caches(self, pk=None):
+        """Удаляет кэш списка проектов и, при наличии pk, детальный кэш."""
+        cache.delete(self.CACHE_KEY_LIST)
+        if pk is not None:
+            cache.delete(self._project_detail_key(pk))
+
     def get_serializer_class(self):
         if self.action == 'retrieve': return ProjectDetailSerializer
         return ProjectSerializer
+
+    # ------------------------------------------------------------------ #
+    # Переопределяем стандартные CRUD-методы для кэширования              #
+    # ------------------------------------------------------------------ #
+    def list(self, request, *args, **kwargs):
+        """
+        GET /api/projects/ — список проектов с кэшированием в Redis.
+        Первый запрос → достаём из PostgreSQL, сохраняем в кэше.
+        Повторные запросы → мгновенный ответ из Redis (≈1 мс вместо ~50 мс).
+        """
+        cached = cache.get(self.CACHE_KEY_LIST)
+        if cached is not None:
+            return Response(cached)
+        response = super().list(request, *args, **kwargs)
+        cache.set(self.CACHE_KEY_LIST, response.data, self.CACHE_TIMEOUT)
+        return response
+
+    def retrieve(self, request, *args, **kwargs):
+        """
+        GET /api/projects/<id>/ — детальный вид проекта (с кластерами / ключевиками).
+        Кэшируем раздельно для каждого проекта.
+        """
+        pk = kwargs.get('pk')
+        cache_key = self._project_detail_key(pk)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+        response = super().retrieve(request, *args, **kwargs)
+        cache.set(cache_key, response.data, self.CACHE_TIMEOUT)
+        return response
+
+    def perform_create(self, serializer):
+        """После создания проекта сбрасываем кэш списка."""
+        super().perform_create(serializer)
+        cache.delete(self.CACHE_KEY_LIST)
+
+    def perform_update(self, serializer):
+        """После обновления сбрасываем и список, и детальный кэш проекта."""
+        instance = serializer.save()
+        self._invalidate_project_caches(pk=instance.pk)
+
+    def perform_destroy(self, instance):
+        """Перед удалением сбрасываем кэши."""
+        self._invalidate_project_caches(pk=instance.pk)
+        super().perform_destroy(instance)
 
     @action(detail=True, methods=['post'])
     def uncategorize_keyword(self, request, pk=None):
@@ -311,6 +373,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
         from .models import Keyword, Cluster
         Keyword.objects.filter(project=project).delete()
         Cluster.objects.filter(project=project).delete()
+        # Данные проекта изменились — сбрасываем его кэш
+        self._invalidate_project_caches(pk=project.pk)
         return Response({'status': 'Проект очищен от слов и кластеров'})
 
     @action(detail=True, methods=['post'])
@@ -353,10 +417,15 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 break
         return Response({'position': str(position) if position > 0 else "> 50", 'found_url': found_url})
 
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=['post'])
     def download_docx(self, request, pk=None):
         project = self.get_object()
-        cluster_id = request.query_params.get('cluster_id')
+        cluster_id = request.data.get('cluster_id')
+        doc_type = request.data.get('doc_type', 'tz') # 'tz' or 'article'
+        text_content = request.data.get('content', '')
+        meta_content = request.data.get('meta', '')
+        lsi_content = request.data.get('lsi', '')
+
         if not cluster_id: return Response({'error': 'No cluster_id'}, status=400)
         
         try:
@@ -364,95 +433,43 @@ class ProjectViewSet(viewsets.ModelViewSet):
         except Cluster.DoesNotExist:
             return Response({'error': 'Cluster empty or not found'}, status=404)
             
-        keywords = cluster.keywords.all().order_by('-volume')
-        
-        # Rule-4 check!
-        if keywords.count() < 3:
-            return Response({'error': 'Rule 4 validation failed: cluster has less than 3 keywords'}, status=400)
-            
-        main_keyword = keywords.first().query
+        main_keyword = cluster.keywords.first().query if cluster.keywords.exists() else 'Без названия'
         cluster_name = main_keyword.capitalize()
-        total_volume = sum(k.volume for k in keywords if k.volume)
-        
-        competitor_data = analyze_serp(main_keyword)
-        vol_min = int(competitor_data['avg_text_length'] * 0.9)
-        vol_max = int(competitor_data['avg_text_length'] * 1.1)
 
         doc = Document()
         style = doc.styles['Normal']
         style.font.name = 'Times New Roman'
         style.font.size = Pt(12)
 
-        head = doc.add_heading(f'ТЗ для копирайтера: {cluster_name}', 0)
+        title_text = f'ТЗ для копирайтера: {cluster_name}' if doc_type == 'tz' else f'Статья: {cluster_name}'
+        head = doc.add_heading(title_text, 0)
         head.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        doc.add_heading('1. Вводная информация', level=1)
-        p = doc.add_paragraph()
-        p.add_run('Сайт: ').bold = True
-        p.add_run(project.url + '\n')
-        p.add_run('Главный запрос: ').bold = True
-        p.add_run(main_keyword + '\n')
-        p.add_run('Общая частотность: ').bold = True
-        p.add_run(str(total_volume))
+        if meta_content:
+            doc.add_heading('SEO-теги (Meta)', level=1)
+            doc.add_paragraph(meta_content)
 
-        doc.add_heading('2. Технические требования', level=1)
-        p = doc.add_paragraph()
-        p.add_run(f'Объем текста: от {vol_min} до {vol_max} символов.\n').bold = True
-        p.add_run('Уникальность: от 85%.\n')
-
-        if competitor_data['competitors_urls']:
-            doc.add_heading('3. Конкуренты из ТОП-3', level=1)
-            for url in competitor_data['competitors_urls']: doc.add_paragraph(url, style='List Bullet')
-        
-        if competitor_data['competitors_structure']:
-            doc.add_heading('4. Рекомендуемая структура', level=1)
-            doc.add_paragraph(competitor_data['competitors_structure'])
-
-        doc.add_heading('5. SEO-рекомендации (Meta Tags)', level=1)
-        
-        h1 = cluster_name
-        title = f"{cluster_name} | {project.name}"
-        description = f"Подробная информация по теме {cluster_name} на сайте {project.name}."
-
-        try:
-            chat = GigaChat(credentials=get_gigachat_key(), verify_ssl_certs=False, model='GigaChat:latest')
-            meta_prompt = f"Ты SEO-специалист.\\nНапиши 1 вариант H1, Title и Description для страницы '{cluster_name}'. Строго в формате:\\nH1: ...\\nTitle: ...\\nDescription: ..."
-            res = chat.chat(meta_prompt)
-            ai_text = res.choices[0].message.content
-            # Логируем
-            log_api_call(request, "gigachat_meta", 1000, "200 OK", 100)
-            
-            lines = ai_text.split('\n')
+        if doc_type == 'article':
+            doc.add_heading('Контент', level=1)
+            # Если это статья (aiContent), просто пишем ее по абзацам или как один большой текст
+            lines = text_content.split('\n')
             for line in lines:
-                if 'H1:' in line: h1 = line.split('H1:')[1].strip()
-                if 'Title:' in line: title = line.split('Title:')[1].strip()
-                if 'Description:' in line: description = line.split('Description:')[1].strip()
-        except:
-            pass
+                if line.strip():
+                    doc.add_paragraph(line.strip())
+        else:
+            # Если это ТЗ (finalText), записываем как есть
+            lines = text_content.split('\n')
+            for line in lines:
+                if line.strip():
+                    doc.add_paragraph(line.strip())
 
-        # Validation Rule R-4 Ensure minimum length for meta fields
-        if not h1 or not title or not description:
-            return Response({'error': 'Rule 4 validation failed: Meta tags missing'}, status=400)
-
-        doc.add_paragraph(f'H1: {h1}')
-        doc.add_paragraph(f'Title: {title}')
-        doc.add_paragraph(f'Description: {description}')
-
-        doc.add_heading('6. Ключевые слова', level=1)
-        table = doc.add_table(rows=1, cols=2)
-        table.style = 'Table Grid'
-        hdr = table.rows[0].cells
-        hdr[0].text, hdr[1].text = 'Фраза', 'Частотность'
-        for kw in list(keywords)[:50]:
-            row = table.add_row().cells
-            row[0].text, row[1].text = kw.query, str(kw.volume)
-
-        if competitor_data['lsi_words']:
-            doc.add_heading('7. LSI слова (TF-IDF)', level=1)
-            doc.add_paragraph(', '.join(competitor_data['lsi_words']))
+        if lsi_content:
+            doc.add_heading('LSI слова', level=1)
+            doc.add_paragraph(lsi_content)
 
         response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-        filename = f"TZ_{cluster_name}.docx"
+        prefix = "Article" if doc_type == 'article' else "TZ"
+        filename = f"{prefix}_{cluster_name}.docx"
         response['Content-Disposition'] = f'attachment; filename*=UTF-8\'\'{urllib.parse.quote(filename)}'
         doc.save(response)
         return response
@@ -489,7 +506,17 @@ class ProjectViewSet(viewsets.ModelViewSet):
         t0 = time.time()
         try:
             chat = GigaChat(credentials=get_gigachat_key(), verify_ssl_certs=False, model='GigaChat:latest', temperature=0.8)
-            prompt = f"РОЛЬ: {role_prompt}\nОСНОВНАЯ ТЕМА: {cluster_name}\nКЛЮЧИ (LSI): {', '.join(top_keys)}\nОБЯЗАТЕЛЬНО: Подробно раскрыть тему минимум на 5000 символов, с заголовками H2/H3."
+            prompt = (
+                f"РОЛЬ: {role_prompt}. Твоя задача — написать информативную, экспертную и полезную SEO-статью.\n"
+                f"ОСНОВНАЯ ТЕМА: {cluster_name}\n"
+                f"ОБЯЗАТЕЛЬНЫЕ КЛЮЧЕВЫЕ СЛОВА (используй органично, можно склонять): {', '.join(top_keys)}\n\n"
+                f"ТРЕБОВАНИЯ К ТЕКСТУ:\n"
+                f"1. Объем: не менее 8000 символов. Тема должна быть раскрыта глубоко и подробно.\n"
+                f"2. Структура: используй структуру статьи с введением, основным телом (заголовки H2, H3) и логичным заключением.\n"
+                f"3. Оформление: разделяй текст на удобные абзацы (не более 4-5 предложений), обязательно используй маркированные списки для перечислений.\n"
+                f"4. Стиль и польза: пиши естественным, понятным языком для людей. Избегай 'воды', сложных штампов и канцеляризмов. Давай конкретную пользу читателю.\n"
+                f"Сгенерируй готовую статью в формате Markdown."
+            )
             response = chat.chat(prompt)
             content = response.choices[0].message.content
             
@@ -515,7 +542,15 @@ class ProjectViewSet(viewsets.ModelViewSet):
         t0 = time.time()
         try:
             chat = GigaChat(credentials=get_gigachat_key(), verify_ssl_certs=False, model='GigaChat:latest')
-            prompt = f"{role_prompt}\nНапиши 3 варианта Title и Description для страницы: '{main_keyword}'. Title до 60 симв, Desc до 160."
+            prompt = (
+                f"РОЛЬ: {role_prompt}. Твоя задача — составить качественные, кликабельные SEO метатеги.\n"
+                f"ГЛАВНЫЙ ЗАПРОС СТРАНИЦЫ: '{main_keyword}'\n\n"
+                f"Сгенерируй 3 уникальных варианта связки (Title + Description).\n"
+                f"ТРЕБОВАНИЯ:\n"
+                f"1. Title (заголовок): длина от 40 до 60 символов. Должен естественно включать главный запрос ближе к началу и привлекать внимание.\n"
+                f"2. Description (описание): длина от 130 до 160 символов. Должен раскрывать суть страницы, содержать призыв к действию (CTA) и отражать ценность для пользователя.\n"
+                f"Верни ответ в удобном читабельном текстовом формате без лишних вступлений."
+            )
             res = chat.chat(prompt)
             duration = int((time.time() - t0) * 1000)
             log_api_call(request, "gigachat_meta", duration, "200 OK", 100)

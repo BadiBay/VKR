@@ -29,13 +29,18 @@ class Migration(migrations.Migration):
             model_name='apilog',
             index=models.Index(fields=['endpoint', 'status'], name='apilog_endpoint_status_idx'),
         ),
-        migrations.AddIndex(
-            model_name='auditlog',
-            index=models.Index(fields=['created_at'], name='auditlog_created_at_idx'),
-        ),
-        migrations.AddIndex(
-            model_name='auditlog',
-            index=models.Index(fields=['project', 'created_at'], name='auditlog_project_date_idx'),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddIndex(
+                    model_name='auditlog',
+                    index=models.Index(fields=['created_at'], name='auditlog_created_at_idx'),
+                ),
+                migrations.AddIndex(
+                    model_name='auditlog',
+                    index=models.Index(fields=['project', 'created_at'], name='auditlog_project_date_idx'),
+                ),
+            ],
+            database_operations=[],
         ),
         migrations.AddIndex(
             model_name='cluster',
@@ -45,9 +50,14 @@ class Migration(migrations.Migration):
             model_name='cluster',
             index=models.Index(fields=['shard_key', 'project'], name='cluster_shard_project_idx'),
         ),
-        migrations.AddIndex(
-            model_name='keyword',
-            index=django.contrib.postgres.indexes.GinIndex(fields=['search_vector'], name='keyword_search_vector_gin_idx'),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddIndex(
+                    model_name='keyword',
+                    index=django.contrib.postgres.indexes.GinIndex(fields=['search_vector'], name='keyword_search_vector_gin_idx'),
+                ),
+            ],
+            database_operations=[],
         ),
         migrations.AddIndex(
             model_name='keyword',

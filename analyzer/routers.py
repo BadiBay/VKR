@@ -28,7 +28,7 @@ SHARDABLE_MODELS = {'cluster', 'keyword'}
 # Соответствие: (shard_key_hash % N) → имя БД
 # Заполнять при добавлении реальных шардов
 SHARD_MAP = {
-    # 0: 'shard_1',
+    0: 'shard_1',
     # 1: 'shard_2',
 }
 NUM_SHARDS = len(SHARD_MAP) or 1

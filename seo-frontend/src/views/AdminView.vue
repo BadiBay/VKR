@@ -24,11 +24,12 @@ onMounted(() => loadData())
 
 async function addKey() {
   const service = prompt("Сервис (gigachat, bukvarix):", "gigachat")
-  const name = prompt("Название ключа:", "Мой GigaChat")
-  const key_value = prompt("Значение ключа (Token):")
-  if (name && key_value && service) {
+  const keyName = prompt("Название ключа:", "Мой GigaChat")
+  const key = prompt("Значение ключа (Token):")
+  if (keyName && key && service) {
     try {
-      await axios.post(`${API}/api-keys/`, { service_name: service, name, key_value })
+      const name = `${service}: ${keyName}`
+      await axios.post(`${API}/api-keys/`, { name, key })
       loadData()
     } catch(e) { alert("Ошибка добавления ключа") }
   }
@@ -94,11 +95,11 @@ async function deleteRole(id) {
            <button @click="addKey" class="btn btn-green btn-sm">Добавить</button>
         </div>
         <table>
-          <thead><tr><th>Сервис</th><th>Название</th><th>Ключ</th><th>Действие</th></tr></thead>
+          <thead><tr><th>ID</th><th>Название (Сервис)</th><th>Ключ</th><th>Действие</th></tr></thead>
           <tbody>
             <tr v-for="k in keys" :key="k.id">
-              <td>{{k.service_name}}</td><td>{{k.name}}</td>
-              <td class="trunc" :title="k.key_value">{{k.key_value}}</td>
+              <td>{{k.id}}</td><td>{{k.name}}</td>
+              <td class="trunc" :title="k.key">{{k.key}}</td>
               <td><button @click="deleteKey(k.id)" class="btn btn-red btn-sm">🗑</button></td>
             </tr>
             <tr v-if="keys.length === 0"><td colspan="4" style="text-align: center; color: var(--text-muted);">Нет ключей</td></tr>

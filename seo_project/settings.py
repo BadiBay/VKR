@@ -59,10 +59,24 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 # Настройки Celery и Redis
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+#CELERY_BROKER_URL = 'redis://localhost:6379/0'
+CELERY_BROKER_URL = 'redis://redis:6379/0'
+CELERY_RESULT_BACKEND = 'redis://redis:6379/0'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
+
+# Настройки кэша Django — используем Redis (db=1, отдельно от Celery на db=0)
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': 'redis://redis:6379/1',
+        'TIMEOUT': 900,  # 15 минут по умолчанию
+        'KEY_PREFIX': 'seo',  # Предотвращает коллизии ключей
+        'OPTIONS': {
+            'max_entries': 1000,
+        },
+    }
+}
 
 # Настройки CORS (разрешаем фронтенд)
 CORS_ALLOWED_ORIGINS = [
@@ -106,7 +120,15 @@ DATABASES = {
             'connect_timeout': 10,
         },
         'CONN_MAX_AGE': 60,  # Reuse connections for 60 seconds
-    }
+    },
+    'shard_1': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'seo_db_shard1',
+        'USER': os.getenv('POSTGRES_USER', 'seo_user'),
+        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'seo_password'),
+        'HOST': os.getenv('POSTGRES_SHARD1_HOST', 'db_shard1'), # Хост второго контейнера
+        'PORT': '5432', # ВНУТРИ сети Docker порт всегда 5432
+    },
 }
 
 # Database Routers — enables future sharding by shard_key

@@ -344,7 +344,7 @@ onMounted(() => load(false));
       <ClusterChart v-if="clusters.length > 1" :clusters="clusters" />
 
       <div class="clusters-controls" style="margin-bottom: 20px;">
-        <button @click="createCluster" class="btn btn-grey">➕ Создать кластер ручками</button>
+        <button @click="createCluster" class="btn btn-grey">➕ Создать кластер вручную</button>
       </div>
 
       <div class="clusters-list" @dragover.prevent @drop.self="onDrop('uncategorized')">
@@ -377,7 +377,7 @@ onMounted(() => load(false));
             <span v-for="k in c.keywords" :key="k.id" class="tag" draggable="true" @dragstart="onDragStart(k, c.id, $event)">
               {{ k.query }} <small>({{ k.volume }})</small>
             </span>
-            <span v-if="c.keywords.length === 0" class="empty-text">Перетащите сюдя ключи...</span>
+            <span v-if="c.keywords.length === 0" class="empty-text">Перетащите сюда ключи...</span>
           </div>
         </div>
       </div>
@@ -400,7 +400,6 @@ h1 { color: var(--text-main); font-size: 2rem; letter-spacing: -0.5px; }
 .url-link { margin-bottom: 20px; font-size: 0.95rem; }
 .audit-block { margin-bottom: 30px; }
 
-/* Мы уже имеем .btn-* глобально, поэтому добавляем специфичные */
 .btn-purple { background: var(--magic); width: 100%; color: white; padding: 12px; font-size: 1rem; border: none; border-radius: var(--radius-sm); font-weight: bold; cursor: pointer; transition: all 0.2s; }
 .btn-purple:hover:not(:disabled) { transform: translateY(-2px); box-shadow: var(--shadow-sm); }
 .btn-purple:disabled { opacity: 0.7; cursor: not-allowed; filter: grayscale(1); }

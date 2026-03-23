@@ -22,7 +22,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
+  db_shard1:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: seo_db_shard1
+      POSTGRES_USER: ${POSTGRES_USER:-seo_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seo_password}
+    volumes:
+      - postgres_shard1_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5433:5432" # Внешний порт 5433, чтобы не конфликтовать с основной БД
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seo_user} -d seo_db_shard1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   # ------------------------------------------------------------------
   # Redis — брокер задач для Celery
   # ------------------------------------------------------------------
@@ -58,7 +74,10 @@ services:
       redis:
         condition: service_healthy
     command: >
-      sh -c "python manage.py migrate &&
+      sh -c "python manage.py migrate analyzer --fake-initial &&
+             python manage.py migrate &&
+             python manage.py migrate --database=shard_1 --fake-initial &&
+             python manage.py test analyzer --noinput &&
              python manage.py runserver 0.0.0.0:8000"
     volumes:
       - .:/app
@@ -71,10 +90,14 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     env_file:
       - .env
     environment:
       POSTGRES_HOST: db
+      POSTGRES_SHARD1_HOST: db_shard1
       REDIS_URL: redis://redis:6379/0
     depends_on:
       db:
@@ -84,6 +107,19 @@ services:
     command: celery -A seo_project worker --loglevel=info
     volumes:
       - .:/app
-
+  frontend:
+      build:
+        context: ./seo-frontend  # Укажи правильный путь к папке фронтенда
+        dockerfile: Dockerfile # Убедись, что внутри папки фронтенда есть свой Dockerfile
+      ports:
+        - "5173:5173"
+      volumes:
+        - ./seo-frontend:/app
+        - /app/node_modules # Чтобы докер не затирал модули локальными
+      environment:
+        - VITE_API_URL=http://localhost:8000/api
+      restart: unless-stopped
+      command: sh -c "npm install && npm run test:unit -- --run && npm run dev -- --host 0.0.0.0"
 volumes:
   postgres_data:
+  postgres_shard1_data:
