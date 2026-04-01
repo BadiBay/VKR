@@ -12,6 +12,12 @@ class Project(models.Model):
     def __str__(self):
         return self.name
 
+    def get_shard_db(self):
+        try:
+            return 'shard_1' if int(self.id) % 2 == 1 else 'default'
+        except (ValueError, TypeError):
+            return 'default'
+
 
 class Cluster(models.Model):
     """
@@ -23,7 +29,7 @@ class Cluster(models.Model):
         ('draft', 'Черновик'),
         ('ready', 'Готов к генерации'),
     ]
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="clusters")
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="clusters", db_constraint=False)
     name = models.CharField(max_length=255, default="Новый кластер")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -59,7 +65,7 @@ class Keyword(models.Model):
     shard_key обеспечивает подготовку к горизонтальному масштабированию.
     search_vector хранит предвычисленный вектор для полнотекстового поиска (GIN).
     """
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="keywords")
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="keywords", db_constraint=False)
     query = models.CharField(max_length=255)
     volume = models.IntegerField(null=True, blank=True)
     cluster = models.ForeignKey(Cluster, on_delete=models.SET_NULL, null=True, blank=True, related_name="keywords")
@@ -92,15 +98,6 @@ class Keyword(models.Model):
 
 
 class AuditLog(models.Model):
-    """
-    Журнал технических SEO-аудитов.
-    Эта модель является РОДИТЕЛЬСКОЙ таблицей с Range Partitioning по created_at.
-    Секции (партиции) создаются через кастомную SQL-миграцию.
-
-    Django не управляет секциями напрямую; сама таблица создаётся через RunSQL.
-    Эта модель используется только для ORM-доступа и сериализаторов.
-    Поле managed = False включается ПОСЛЕ того, как SQL-миграция создаст таблицу.
-    """
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="audits")
     score = models.IntegerField(default=0)
     # JSONB вместо JSONField — в PostgreSQL автоматически хранится как JSONB (бинарный JSON)
@@ -112,7 +109,8 @@ class AuditLog(models.Model):
         return f"Audit {self.project.name} - Score: {self.score}"
 
     class Meta:
-        # Индекс по дате обязателен для Range Partitioning
+        managed = False  # Таблицей теперь управляет PostgreSQL
+        db_table = 'analyzer_auditlog'
         indexes = [
             models.Index(fields=['created_at'], name='auditlog_created_at_idx'),
             models.Index(fields=['project', 'created_at'], name='auditlog_project_date_idx'),

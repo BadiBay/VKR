@@ -4,11 +4,13 @@
 Django>=4.2,<5.3
 djangorestframework>=3.14.0
 django-cors-headers>=4.3.0
-
+django-redis>=5.4.0
+colorama
 # ============================================================
 # Database
 # ============================================================
 psycopg2-binary>=2.9.9
+clickhouse-driver>=0.2.6
 
 # ============================================================
 # Environment variables

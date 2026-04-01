@@ -7,6 +7,7 @@ import urllib.parse
 from bs4 import BeautifulSoup
 from .models import Project, Keyword, Cluster
 from .clustering import cluster_keywords
+from .clickhouse_client import get_clickhouse_client, ensure_seo_logs_table_exists
 
 # ==========================================
 # МОДУЛЬ 1: BUKVARIX (Поиск по домену)
@@ -180,10 +181,69 @@ def collect_comprehensive_semantics(base_url):
 # ==========================================
 
 @shared_task
+def log_seo_analysis_to_clickhouse(
+    project_id,
+    project_url,
+    task_name,
+    status,
+    keywords_count=0,
+    clusters_count=0,
+    duration_ms=0,
+    source='celery',
+    error_message='',
+):
+    """
+    Асинхронный логгер событий SEO-анализа в ClickHouse.
+    Не бросает исключения наружу, чтобы не ломать основной pipeline.
+    """
+    try:
+        ensure_seo_logs_table_exists()
+        client = get_clickhouse_client()
+        client.execute(
+            """
+            INSERT INTO seo_analysis_logs
+            (
+                event_time,
+                project_id,
+                project_url,
+                task_name,
+                status,
+                keywords_count,
+                clusters_count,
+                duration_ms,
+                source,
+                error_message
+            )
+            VALUES
+            """,
+            [
+                (
+                    int(time.time()),
+                    int(project_id),
+                    str(project_url or ''),
+                    str(task_name),
+                    str(status),
+                    int(keywords_count or 0),
+                    int(clusters_count or 0),
+                    int(duration_ms or 0),
+                    str(source),
+                    str(error_message or ''),
+                )
+            ],
+        )
+        return "ok"
+    except Exception as exc:
+        print(f"⚠️ ClickHouse logging failed: {exc}")
+        return "failed"
+
+
+@shared_task
 def fetch_keywords_for_project(project_id):
+    started_at = time.time()
     try:
         project = Project.objects.get(id=project_id)
-    except Project.DoesNotExist: return "Project not found"
+    except Project.DoesNotExist:
+        return "Project not found"
 
     # Запуск агрегатора
     keywords_data = collect_comprehensive_semantics(project.url)
@@ -192,22 +252,46 @@ def fetch_keywords_for_project(project_id):
         keywords_data = [{'keyword': 'нет данных', 'volume': 0}]
 
     try:
-        Keyword.objects.filter(project=project).delete()
-        Cluster.objects.filter(project=project).delete()
-        kws = [Keyword(project=project, query=i['keyword'][:250], volume=i['volume']) for i in keywords_data]
-        Keyword.objects.bulk_create(kws, ignore_conflicts=True)
+        db = project.get_shard_db()
+        Keyword.objects.using(db).filter(project=project).delete()
+        Cluster.objects.using(db).filter(project=project).delete()
+        kws = [Keyword(project=project, shard_key=str(project.id), query=i['keyword'][:250], volume=i['volume']) for i in keywords_data]
+        Keyword.objects.using(db).bulk_create(kws, ignore_conflicts=True)
+        log_seo_analysis_to_clickhouse.delay(
+            project_id=project.id,
+            project_url=project.url,
+            task_name='fetch_keywords_for_project',
+            status='success',
+            keywords_count=len(kws),
+            clusters_count=0,
+            duration_ms=int((time.time() - started_at) * 1000),
+            source='celery_worker',
+        )
         return f"Saved {len(kws)} keywords"
     except Exception as e:
+        log_seo_analysis_to_clickhouse.delay(
+            project_id=project.id,
+            project_url=project.url,
+            task_name='fetch_keywords_for_project',
+            status='error',
+            keywords_count=0,
+            clusters_count=0,
+            duration_ms=int((time.time() - started_at) * 1000),
+            source='celery_worker',
+            error_message=str(e)[:1000],
+        )
         return f"DB Error: {e}"
 
 @shared_task(bind=True) # <--- ВАЖНО: bind=True дает доступ к self
 def cluster_keywords_for_project(self, project_id):
+    started_at = time.time()
     try:
         # ЭТАП 1: Подготовка (0-10%)
         self.update_state(state='PROGRESS', meta={'process': 'Подготовка данных...', 'percent': 5})
         
         project = Project.objects.get(id=project_id)
-        kws_qs = list(project.keywords.values('query', 'volume'))
+        db = project.get_shard_db()
+        kws_qs = list(project.keywords.using(db).values('query', 'volume'))
         if not kws_qs: 
             return "No keywords"
             
@@ -232,7 +316,7 @@ def cluster_keywords_for_project(self, project_id):
             cluster_queries[cluster_id].append(query)
         
         # Очищаем старые кластеры перед созданием новых
-        Cluster.objects.filter(project=project).delete()
+        Cluster.objects.using(db).filter(project=project).delete()
         
         # Создаем новые кластеры в БД
         cluster_mapping = {}
@@ -244,8 +328,9 @@ def cluster_keywords_for_project(self, project_id):
             
             cluster_name = best_query.capitalize()
             
-            new_cluster = Cluster.objects.create(
+            new_cluster = Cluster.objects.using(db).create(
                 project=project,
+                shard_key=str(project.id),
                 name=cluster_name,
                 status='draft'
             )
@@ -254,11 +339,39 @@ def cluster_keywords_for_project(self, project_id):
         # Назначаем кластеры ключевым словам
         for query, cluster_id in clustered_data.items():
             db_cluster = cluster_mapping[cluster_id]
-            Keyword.objects.filter(project=project, query=query).update(cluster=db_cluster)
+            Keyword.objects.using(db).filter(project=project, query=query).update(cluster=db_cluster)
+
+        log_seo_analysis_to_clickhouse.delay(
+            project_id=project.id,
+            project_url=project.url,
+            task_name='cluster_keywords_for_project',
+            status='success',
+            keywords_count=len(kws_qs),
+            clusters_count=len(unique_cluster_ids),
+            duration_ms=int((time.time() - started_at) * 1000),
+            source='celery_worker',
+        )
         
         return {'process': 'Готово!', 'percent': 100}
         
     except Exception as e:
         # Если ошибка, передаем её наверх
+        project_url = ''
+        try:
+            project_url = project.url
+        except Exception:
+            pass
+
+        log_seo_analysis_to_clickhouse.delay(
+            project_id=project_id,
+            project_url=project_url,
+            task_name='cluster_keywords_for_project',
+            status='error',
+            keywords_count=0,
+            clusters_count=0,
+            duration_ms=int((time.time() - started_at) * 1000),
+            source='celery_worker',
+            error_message=str(e)[:1000],
+        )
         self.update_state(state='FAILURE', meta={'process': f'Ошибка: {str(e)}', 'percent': 0})
         raise e

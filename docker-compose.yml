@@ -16,7 +16,7 @@ services:
       # Инициализационный скрипт: включаем pg_trgm при первом старте
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
-      - "5432:5432"
+      - "5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seo_user} -d ${POSTGRES_DB:-seo_db}"]
       interval: 10s
@@ -39,6 +39,24 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+  # ------------------------------------------------------------------
+  # ClickHouse — аналитическая база данных
+  # ------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    user: "101:101" # clickhouse user id in image
+    restart: unless-stopped
+    ports:
+      - "8123:8123" # HTTP port (открыт наружу для удобства)
+      - "9000:9000" # Native port (внутри сети используется для clickhouse-driver)
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # ------------------------------------------------------------------
   # Redis — брокер задач для Celery
   # ------------------------------------------------------------------
@@ -73,6 +91,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     command: >
       sh -c "python manage.py migrate analyzer --fake-initial &&
              python manage.py migrate &&
@@ -104,6 +124,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     command: celery -A seo_project worker --loglevel=info
     volumes:
       - .:/app
@@ -123,3 +145,4 @@ services:
 volumes:
   postgres_data:
   postgres_shard1_data:
+  clickhouse_data:

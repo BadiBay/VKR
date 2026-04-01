@@ -17,17 +17,18 @@ class ProjectSerializer(serializers.ModelSerializer):
         model = Project
         fields = ['id', 'name', 'url', 'created_at']
 
-class ProjectDetailSerializer(serializers.ModelSerializer):
-    keywords = KeywordSerializer(many=True, read_only=True)
-    clusters = ClusterSerializer(many=True, read_only=True)
-    class Meta:
-        model = Project
-        fields = ['id', 'name', 'url', 'created_at', 'keywords', 'clusters']
-
 class AuditLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = AuditLog
         fields = '__all__'
+
+class ProjectDetailSerializer(serializers.ModelSerializer):
+    keywords = KeywordSerializer(many=True, read_only=True)
+    clusters = ClusterSerializer(many=True, read_only=True)
+    audits = AuditLogSerializer(many=True, read_only=True)
+    class Meta:
+        model = Project
+        fields = ['id', 'name', 'url', 'created_at', 'keywords', 'clusters', 'audits']
 
 class APIKeySerializer(serializers.ModelSerializer):
     class Meta:

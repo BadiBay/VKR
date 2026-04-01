@@ -2,8 +2,10 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.http import JsonResponse, HttpResponse
-from django.core.cache import cache
 from django.db.models import Sum
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
+from django.core.cache import cache
 from celery.result import AsyncResult
 import requests
 from bs4 import BeautifulSoup
@@ -182,6 +184,17 @@ class ClusterViewSet(viewsets.ModelViewSet):
     queryset = Cluster.objects.all()
     serializer_class = ClusterSerializer
 
+    def get_object(self):
+        pk = self.kwargs.get('pk')
+        # Пытаемся найти объект во всех известных шардах
+        for db in ['default', 'shard_1']:
+            try:
+                return Cluster.objects.using(db).get(pk=pk)
+            except Cluster.DoesNotExist:
+                continue
+        from django.http import Http404
+        raise Http404
+
     @action(detail=True, methods=['post'])
     def change_status(self, request, pk=None):
         cluster = self.get_object()
@@ -197,7 +210,9 @@ class ClusterViewSet(viewsets.ModelViewSet):
         cluster = self.get_object()
         keyword_id = request.data.get('keyword_id')
         try:
-            kw = Keyword.objects.get(id=keyword_id)
+            # Используем менеджер проекта или ищем во всех шардах
+            db = cluster.project.get_shard_db()
+            kw = Keyword.objects.using(db).get(id=keyword_id)
             kw.cluster = cluster
             kw.save()
             return Response({'status': 'Keyword moved'})
@@ -218,78 +233,30 @@ class AIRoleViewSet(viewsets.ModelViewSet):
 
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all().order_by('-created_at')
-
-    # ------------------------------------------------------------------ #
-    # Ключи кэша                                                           #
-    # ------------------------------------------------------------------ #
-    CACHE_KEY_LIST = 'project_list'
-    CACHE_TIMEOUT = 900  # 15 минут
-
-    @staticmethod
-    def _project_detail_key(pk):
-        return f'project_detail_{pk}'
-
-    def _invalidate_project_caches(self, pk=None):
-        """Удаляет кэш списка проектов и, при наличии pk, детальный кэш."""
-        cache.delete(self.CACHE_KEY_LIST)
-        if pk is not None:
-            cache.delete(self._project_detail_key(pk))
-
+    
     def get_serializer_class(self):
         if self.action == 'retrieve': return ProjectDetailSerializer
         return ProjectSerializer
 
-    # ------------------------------------------------------------------ #
-    # Переопределяем стандартные CRUD-методы для кэширования              #
-    # ------------------------------------------------------------------ #
+    @method_decorator(cache_page(60 * 15)) # Кешируем список проектов на 15 минут
     def list(self, request, *args, **kwargs):
-        """
-        GET /api/projects/ — список проектов с кэшированием в Redis.
-        Первый запрос → достаём из PostgreSQL, сохраняем в кэше.
-        Повторные запросы → мгновенный ответ из Redis (≈1 мс вместо ~50 мс).
-        """
-        cached = cache.get(self.CACHE_KEY_LIST)
-        if cached is not None:
-            return Response(cached)
-        response = super().list(request, *args, **kwargs)
-        cache.set(self.CACHE_KEY_LIST, response.data, self.CACHE_TIMEOUT)
-        return response
-
-    def retrieve(self, request, *args, **kwargs):
-        """
-        GET /api/projects/<id>/ — детальный вид проекта (с кластерами / ключевиками).
-        Кэшируем раздельно для каждого проекта.
-        """
-        pk = kwargs.get('pk')
-        cache_key = self._project_detail_key(pk)
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached)
-        response = super().retrieve(request, *args, **kwargs)
-        cache.set(cache_key, response.data, self.CACHE_TIMEOUT)
-        return response
+        return super().list(request, *args, **kwargs)
 
     def perform_create(self, serializer):
-        """После создания проекта сбрасываем кэш списка."""
-        super().perform_create(serializer)
-        cache.delete(self.CACHE_KEY_LIST)
+        # При создании нового проекта — сбрасываем кэш списка, 
+        # чтобы пользователь сразу увидел изменения.
+        serializer.save()
+        cache.delete_pattern("*.projects.list.*") # Если используется django-redis
+        cache.clear() # Универсальный сброс для демо-версии
 
-    def perform_update(self, serializer):
-        """После обновления сбрасываем и список, и детальный кэш проекта."""
-        instance = serializer.save()
-        self._invalidate_project_caches(pk=instance.pk)
-
-    def perform_destroy(self, instance):
-        """Перед удалением сбрасываем кэши."""
-        self._invalidate_project_caches(pk=instance.pk)
-        super().perform_destroy(instance)
 
     @action(detail=True, methods=['post'])
     def uncategorize_keyword(self, request, pk=None):
         project = self.get_object()
         keyword_id = request.data.get('keyword_id')
         try:
-            kw = Keyword.objects.get(id=keyword_id, project=project)
+            # Используем связанный менеджер, чтобы роутер получил подсказку (hints) о проекте
+            kw = project.keywords.get(id=keyword_id)
             kw.cluster = None
             kw.save()
             return Response({'status': 'Keyword uncategorized'})
@@ -319,16 +286,17 @@ class ProjectViewSet(viewsets.ModelViewSet):
             keywords = df[query_col].dropna().astype(str).tolist()
             volumes = df[vol_col].fillna(0).astype(int).tolist() if vol_col else [0]*len(keywords)
 
+            db = project.get_shard_db()
             # Constraint: 15,000 max
-            if Keyword.objects.filter(project=project).count() + len(keywords) > 15000:
+            if Keyword.objects.using(db).filter(project=project).count() + len(keywords) > 15000:
                 return Response({'error': 'Limit of 15000 keywords per project exceeded'}, status=400)
             
             kws = []
             for q, v in zip(keywords, volumes):
                 q = q.strip()[:250]
-                if q: kws.append(Keyword(project=project, query=q, volume=v))
+                if q: kws.append(Keyword(project=project, shard_key=str(project.id), query=q, volume=v))
             
-            Keyword.objects.bulk_create(kws, ignore_conflicts=True)
+            Keyword.objects.using(db).bulk_create(kws, ignore_conflicts=True)
             return Response({'status': f'Imported {len(kws)} keywords'})
         except Exception as e:
             return Response({'error': str(e)}, status=400)
@@ -340,7 +308,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
         min_volume = filters.get('min_volume')
         stop_words = filters.get('stop_words', [])
         
-        qs = project.keywords.all()
+        db = project.get_shard_db()
+        qs = project.keywords.using(db).all()
         deleted = 0
         
         if min_volume is not None:
@@ -357,30 +326,30 @@ class ProjectViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='reset_clusters')
     def reset_clusters(self, request, pk=None):
         project = self.get_object()
+        db = project.get_shard_db()
         only_drafts = request.data.get('only_drafts', False)
         if only_drafts:
             from .models import Cluster
-            Cluster.objects.filter(project=project, status='draft').delete()
+            Cluster.objects.using(db).filter(project=project, status='draft').delete()
             return Response({'status': 'Удалены только черновики кластеров'})
         else:
             from .models import Cluster
-            Cluster.objects.filter(project=project).delete()
+            Cluster.objects.using(db).filter(project=project).delete()
             return Response({'status': 'Все кластеры удалены'})
 
     @action(detail=True, methods=['post'], url_path='clear_project')
     def clear_project(self, request, pk=None):
         project = self.get_object()
+        db = project.get_shard_db()
         from .models import Keyword, Cluster
-        Keyword.objects.filter(project=project).delete()
-        Cluster.objects.filter(project=project).delete()
-        # Данные проекта изменились — сбрасываем его кэш
-        self._invalidate_project_caches(pk=project.pk)
+        Keyword.objects.using(db).filter(project=project).delete()
+        Cluster.objects.using(db).filter(project=project).delete()
         return Response({'status': 'Проект очищен от слов и кластеров'})
 
     @action(detail=True, methods=['post'])
     def run_fetch(self, request, pk=None):
-        fetch_keywords_for_project.delay(self.get_object().id)
-        return Response({'status': 'started'})
+        task = fetch_keywords_for_project.delay(self.get_object().id)
+        return Response({'task_id': task.id})
 
     @action(detail=True, methods=['post'])
     def run_clustering(self, request, pk=None):
@@ -391,7 +360,22 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def analyze_competitors(self, request):
         query = request.data.get('query', '')
         if not query: return Response({'error': 'No query'}, status=400)
-        return Response(analyze_serp(query))
+        
+        # Пример ручного кэширования
+        cache_key = f"competitors_analysis_{query}"
+        cached_data = cache.get(cache_key)
+        
+        if cached_data:
+            print(f"📦 Возврат из кэша для: {query}")
+            return Response(cached_data)
+
+        # Выполняем тяжелый анализ, если нет в кэше
+        result = analyze_serp(query)
+        
+        # Сохраняем результат в кэш на 1 час (3600 секунд)
+        cache.set(cache_key, result, timeout=60 * 60)
+        
+        return Response(result)
 
     @action(detail=True, methods=['get'])
     def audit(self, request, pk=None):
@@ -429,7 +413,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
         if not cluster_id: return Response({'error': 'No cluster_id'}, status=400)
         
         try:
-            cluster = Cluster.objects.get(id=cluster_id)
+            # Определяем шард проекта и ищем кластер там
+            db = project.get_shard_db()
+            cluster = Cluster.objects.using(db).get(id=cluster_id)
         except Cluster.DoesNotExist:
             return Response({'error': 'Cluster empty or not found'}, status=404)
             
@@ -484,7 +470,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
         if not cluster_id: return Response({'error': 'No cluster_id'}, status=400)
         
         try:
-            cluster = Cluster.objects.get(id=cluster_id)
+            # Определяем шард проекта и ищем кластер там
+            db = project.get_shard_db()
+            cluster = Cluster.objects.using(db).get(id=cluster_id)
         except Cluster.DoesNotExist:
             return Response({'error': 'Empty or Missing Cluster'}, status=404)
         

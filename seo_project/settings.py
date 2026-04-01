@@ -59,24 +59,11 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 # Настройки Celery и Redis
-#CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_BROKER_URL = 'redis://redis:6379/0'
-CELERY_RESULT_BACKEND = 'redis://redis:6379/0'
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
-
-# Настройки кэша Django — используем Redis (db=1, отдельно от Celery на db=0)
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': 'redis://redis:6379/1',
-        'TIMEOUT': 900,  # 15 минут по умолчанию
-        'KEY_PREFIX': 'seo',  # Предотвращает коллизии ключей
-        'OPTIONS': {
-            'max_entries': 1000,
-        },
-    }
-}
 
 # Настройки CORS (разрешаем фронтенд)
 CORS_ALLOWED_ORIGINS = [
@@ -102,6 +89,20 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'seo_project.wsgi.application'
+
+# ==============================================================================
+# CACHES Configuration
+# ==============================================================================
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": os.environ.get('REDIS_URL', 'redis://redis:6379/0'), # Используем тот же Redis, что и для Celery
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "IGNORE_EXCEPTIONS": True, # Не падать, если Redis недоступен (fallback к базе/генерации)
+        }
+    }
+}
 
 
 # Database
@@ -132,7 +133,13 @@ DATABASES = {
 }
 
 # Database Routers — enables future sharding by shard_key
-DATABASE_ROUTERS = ['analyzer.routers.ShardRouter']
+import sys
+TESTING = 'test' in sys.argv
+
+if TESTING:
+    DATABASE_ROUTERS = []
+else:
+    DATABASE_ROUTERS = ['analyzer.routers.ShardRouter']
 
 
 # Password validation
@@ -175,3 +182,15 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# ------------------------------------------------------------------
+# ClickHouse Configuration
+# ------------------------------------------------------------------
+CLICKHOUSE_CONFIG = {
+    'HOST': os.environ.get('CLICKHOUSE_HOST', 'localhost'),
+    'PORT': int(os.environ.get('CLICKHOUSE_PORT', 9000)),
+    'USER': os.environ.get('CLICKHOUSE_USER', 'default'),
+    'PASSWORD': os.environ.get('CLICKHOUSE_PASSWORD', ''),
+    'DATABASE': os.environ.get('CLICKHOUSE_DB', 'default'),
+    'SECURE': os.environ.get('CLICKHOUSE_SECURE', 'False').lower() == 'true',
+}
