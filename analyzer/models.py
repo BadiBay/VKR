@@ -20,11 +20,6 @@ class Project(models.Model):
 
 
 class Cluster(models.Model):
-    """
-    Кластер ключевых слов.
-    shard_key используется для будущей маршрутизации запросов к разным БД.
-    Значение формируется как str(project_id) и задаётся при сохранении.
-    """
     STATUS_CHOICES = [
         ('draft', 'Черновик'),
         ('ready', 'Готов к генерации'),
@@ -34,16 +29,10 @@ class Cluster(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     created_at = models.DateTimeField(auto_now_add=True)
 
-    # --- Подготовка к шардированию ---
-    # Ключ шардирования на основе project_id; задаётся автоматически в save()
-    shard_key = models.CharField(
-        max_length=64,
-        db_index=True,
-        help_text="Ключ шарда (например, str(project_id)). Используется для маршрутизации запросов."
-    )
+    # Ключ шардирования — заполняется автоматически из project_id
+    shard_key = models.CharField(max_length=64, db_index=True)
 
     def save(self, *args, **kwargs):
-        # Автоматически заполняем shard_key из project_id перед сохранением
         if self.project_id and not self.shard_key:
             self.shard_key = str(self.project_id)
         super().save(*args, **kwargs)
@@ -52,7 +41,6 @@ class Cluster(models.Model):
         return f"{self.name} ({self.get_status_display()})"
 
     class Meta:
-        # Составной индекс для ускорения поиска по проекту + статусу
         indexes = [
             models.Index(fields=['project', 'status'], name='cluster_project_status_idx'),
             models.Index(fields=['shard_key', 'project'], name='cluster_shard_project_idx'),
@@ -60,24 +48,15 @@ class Cluster(models.Model):
 
 
 class Keyword(models.Model):
-    """
-    Ключевое слово / поисковый запрос (SearchQuery).
-    shard_key обеспечивает подготовку к горизонтальному масштабированию.
-    search_vector хранит предвычисленный вектор для полнотекстового поиска (GIN).
-    """
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="keywords", db_constraint=False)
     query = models.CharField(max_length=255)
     volume = models.IntegerField(null=True, blank=True)
     cluster = models.ForeignKey(Cluster, on_delete=models.SET_NULL, null=True, blank=True, related_name="keywords")
 
-    # --- Подготовка к шардированию ---
-    shard_key = models.CharField(
-        max_length=64,
-        db_index=True,
-        help_text="Ключ шарда (например, str(project_id)). Используется для маршрутизации запросов."
-    )
+    # Ключ шардирования — заполняется автоматически из project_id
+    shard_key = models.CharField(max_length=64, db_index=True)
 
-    # Поле для хранения tsvector — заполняется триггером в SQL-миграции
+    # Поле tsvector для полнотекстового поиска — заполняется триггером в миграции
     search_vector = SearchVectorField(null=True, blank=True)
 
     def save(self, *args, **kwargs):
@@ -88,11 +67,8 @@ class Keyword(models.Model):
     class Meta:
         unique_together = ('project', 'query')
         indexes = [
-            # GIN-индекс для PostgreSQL полнотекстового поиска
             GinIndex(fields=['search_vector'], name='keyword_search_vector_gin_idx'),
-            # Составной индекс для поиска по кластеру
             models.Index(fields=['cluster', 'project'], name='keyword_cluster_project_idx'),
-            # Индекс по shard_key для роутинга
             models.Index(fields=['shard_key', 'cluster'], name='keyword_shard_cluster_idx'),
         ]
 
@@ -100,8 +76,6 @@ class Keyword(models.Model):
 class AuditLog(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="audits")
     score = models.IntegerField(default=0)
-    # JSONB вместо JSONField — в PostgreSQL автоматически хранится как JSONB (бинарный JSON)
-    # что обеспечивает индексирование и быстрый доступ к отдельным полям
     checks_json = models.JSONField(default=list)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -109,7 +83,7 @@ class AuditLog(models.Model):
         return f"Audit {self.project.name} - Score: {self.score}"
 
     class Meta:
-        managed = False  # Таблицей теперь управляет PostgreSQL
+        managed = False  # Таблицей управляет PostgreSQL через миграцию
         db_table = 'analyzer_auditlog'
         indexes = [
             models.Index(fields=['created_at'], name='auditlog_created_at_idx'),

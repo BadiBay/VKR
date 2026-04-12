@@ -97,14 +97,14 @@ class ClusterAPITests(APITestCase):
         self.assertEqual(kw.cluster, cluster2)
 
 class UtilityMocksTests(APITestCase):
-    @patch('analyzer.views.analyze_serp')
+    @patch('analyzer.services.parsing.ParsingService.analyze_serp')
     def test_analyze_competitors(self, mock_analyze):
         mock_analyze.return_value = {'competitors_urls': ['https://a.com']}
         res = self.client.post('/api/projects/analyze_competitors/', {'query': 'test'})
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertIn('competitors_urls', res.data)
         
-    @patch('analyzer.views.check_site_health')
+    @patch('analyzer.services.audit.AuditService.check_site_health')
     def test_project_audit(self, mock_health):
         mock_health.return_value = {'score': 90, 'checks': []}
         project = Project.objects.create(name="A", url="https://a.com")
